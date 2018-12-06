@@ -180,8 +180,6 @@ function krb5_configuration() {
 function create_root_user_principal_and_ready_stash() {
   if [[ "${FQDN}" == "${MASTER_FQDN}" ]]; then
     echo "Creating root principal root@${REALM}."
-#below line added by Ankit to see what is the password being decrypted
-    echo "THIS LINE ADDED BY ANKIT: ${root_principal_password}\n"
     echo -e "${root_principal_password}\n${root_principal_password}" | /usr/sbin/kadmin.local -q "addprinc root"
     if [[ "${HA_MODE}" == 1 ]]; then
       echo "In HA mode, writing krb5 stash file to GCS: gs://${staging_meta_info_gcs_prefix}/stash"
