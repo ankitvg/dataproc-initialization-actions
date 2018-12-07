@@ -54,8 +54,10 @@ DOMAIN="${FQDN#*\.}"
 REALM="$(echo ${DOMAIN} | awk '{print toupper($0)}')"
 # In HA mode, this will be the 'first-master', i.e. $CLUSTER_NAME-m-0
 MASTER="$(/usr/share/google/get_metadata_value attributes/dataproc-master)"
+KDC_FQDN="kdc.${DOMAIN}"
 MASTER_FQDN="${MASTER}.${DOMAIN}"
 HADOOP_CONF_DIR="/etc/hadoop/conf"
+JAVA_HOME="/usr/lib/jvm/java-1.8.0-openjdk-amd64"
 
 readonly kms_key_uri="$(/usr/share/google/get_metadata_value attributes/kms-key-uri)"
 readonly root_password_uri="$(/usr/share/google/get_metadata_value attributes/root-password-uri)"
@@ -119,33 +121,33 @@ readonly dataproc_bucket="$(/usr/share/google/get_metadata_value attributes/data
 readonly staging_meta_info_gcs_prefix="${dataproc_bucket}/google-cloud-dataproc-metainfo/${CLUSTER_UUID}/secure_init_action"
 readonly krb5_server_mark_file="krb5-server-mark"
 
-function install_and_start_kerberos_server() {
-  echo "Installing krb5-kdc and krb5-admin-server."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y krb5-kdc krb5-admin-server
-  krb5_configuration
+# function install_and_start_kerberos_server() {
+#   echo "Installing krb5-kdc and krb5-admin-server."
+#   DEBIAN_FRONTEND=noninteractive apt-get install -y krb5-kdc krb5-admin-server
+#   krb5_configuration
 
-  # Retrieve the password to new db and generate new db
-  # The '-W' option will force the use of /dev/urandom instead
-  # of /dev/random for entropy, which will help speed up db creation.
-  # Only run this from the Master-KDC in HA mode.
-  if [[ "${FQDN}" == "${MASTER_FQDN}" ]]; then
-    echo "Creating KDC database."
-    echo -e "${db_password}\n${db_password}" | /usr/sbin/kdb5_util create -s -W
-  fi
+#   # Retrieve the password to new db and generate new db
+#   # The '-W' option will force the use of /dev/urandom instead
+#   # of /dev/random for entropy, which will help speed up db creation.
+#   # Only run this from the Master-KDC in HA mode.
+#   if [[ "${FQDN}" == "${KDC_FQDN}" ]]; then
+#     echo "Creating KDC database."
+#     echo -e "${db_password}\n${db_password}" | /usr/sbin/kdb5_util create -s -W
+#   fi
 
-  # Give principal 'root' admin access
-  cat << EOF >> /etc/krb5kdc/kadm5.acl
-root *
-EOF
+#   # Give principal 'root' admin access
+#   cat << EOF >> /etc/krb5kdc/kadm5.acl
+# root *
+# EOF
 
-  if [[ "${FQDN}" == "${MASTER_FQDN}" ]]; then
-    echo "Restarting krb5-kdc on Master KDC."
-    systemctl restart krb5-kdc || err 'Cannot restart KDC'
+#   if [[ "${FQDN}" == "${KDC_FQDN}" ]]; then
+#     echo "Restarting krb5-kdc on Master KDC."
+#     systemctl restart krb5-kdc || err 'Cannot restart KDC'
 
-    echo "Restarting krb5-admin-server on Master KDC."
-    systemctl restart krb5-admin-server || err 'Cannot restart Kerberos admin server'
-  fi
-}
+#     echo "Restarting krb5-admin-server on Master KDC."
+#     systemctl restart krb5-admin-server || err 'Cannot restart Kerberos admin server'
+#   fi
+# }
 
 function install_kerberos_client() {
   echo "Installing krb5-user and krb5-config."
@@ -154,11 +156,12 @@ function install_kerberos_client() {
 }
 
 function install_kerberos() {
-  if [[ "${ROLE}" == 'Master' ]]; then
-    install_and_start_kerberos_server
-  else
-    install_kerberos_client
-  fi
+  # if [[ "${ROLE}" == 'Master' ]]; then
+  #   install_and_start_kerberos_server
+  # else
+  #   install_kerberos_client
+  # fi
+  install_kerberos_client
 }
 
 function krb5_configuration() {
@@ -174,64 +177,65 @@ function krb5_configuration() {
       additional_kdcs+="\t\tkdc = ${additional_master}.${DOMAIN}\n"
     done
   fi
-  sed -i "/\[realms\]/a\ \t${REALM} = {\n\t\tkdc = ${MASTER_FQDN}\n${additional_kdcs}\t\tadmin_server = ${MASTER_FQDN}\n\t}" "/etc/krb5.conf"
+  sed -i "/\[realms\]/a\ \t${REALM} = {\n\t\tkdc = ${KDC_FQDN}\n${additional_kdcs}\t\tadmin_server = ${KDC_FQDN}\n\t}" "/etc/krb5.conf"
 }
 
-function create_root_user_principal_and_ready_stash() {
-  if [[ "${FQDN}" == "${MASTER_FQDN}" ]]; then
-    echo "Creating root principal root@${REALM}."
-    echo -e "${root_principal_password}\n${root_principal_password}" | /usr/sbin/kadmin.local -q "addprinc root"
-    if [[ "${HA_MODE}" == 1 ]]; then
-      echo "In HA mode, writing krb5 stash file to GCS: gs://${staging_meta_info_gcs_prefix}/stash"
-      gsutil cp /etc/krb5kdc/stash "gs://${staging_meta_info_gcs_prefix}/stash"
-    fi
-    # write a file to gcs to signal to workers (and possibly additional masters)
-    # that Kerberos server on Master KDC is ready
-    # (root principal is also created).
-    echo "Writing krb5 server mark file in GCS: gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"
-    touch /tmp/"${krb5_server_mark_file}"
-    gsutil cp /tmp/"${krb5_server_mark_file}" "gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"
-    rm /tmp/"${krb5_server_mark_file}"
-  fi
-}
+# function create_root_user_principal_and_ready_stash() {
+#   if [[ "${FQDN}" == "${MASTER_FQDN}" ]]; then
+#     echo "Creating root principal root@${REALM}."
+#     echo -e "${root_principal_password}\n${root_principal_password}" | /usr/sbin/kadmin.local -q "addprinc root"
+#     if [[ "${HA_MODE}" == 1 ]]; then
+#       echo "In HA mode, writing krb5 stash file to GCS: gs://${staging_meta_info_gcs_prefix}/stash"
+#       gsutil cp /etc/krb5kdc/stash "gs://${staging_meta_info_gcs_prefix}/stash"
+#     fi
+#     # write a file to gcs to signal to workers (and possibly additional masters)
+#     # that Kerberos server on Master KDC is ready
+#     # (root principal is also created).
+#     echo "Writing krb5 server mark file in GCS: gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"
+#     touch /tmp/"${krb5_server_mark_file}"
+#     gsutil cp /tmp/"${krb5_server_mark_file}" "gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"
+#     rm /tmp/"${krb5_server_mark_file}"
+#   fi
+# }
 
-function create_cross_realm_trust_principal_if_necessary() {
-  if [[ "${FQDN}" == "${MASTER_FQDN}" && -n "${cross_realm_trust_realm}" ]]; then
-    echo "Creating cross-realm trust principal krbtgt/${REALM}@${cross_realm_trust_realm}"
-    echo -e "${trust_password}\n${trust_password}" | /usr/sbin/kadmin.local -q "addprinc krbtgt/${REALM}@${cross_realm_trust_realm}"
-  fi
-}
+# function create_cross_realm_trust_principal_if_necessary() {
+#   if [[ "${FQDN}" == "${MASTER_FQDN}" && -n "${cross_realm_trust_realm}" ]]; then
+#     echo "Creating cross-realm trust principal krbtgt/${REALM}@${cross_realm_trust_realm}"
+#     echo -e "${trust_password}\n${trust_password}" | /usr/sbin/kadmin.local -q "addprinc krbtgt/${REALM}@${cross_realm_trust_realm}"
+#   fi
+# }
 
 function install_jce() {
+  DEBIAN_FRONTEND=noninteractive apt-get install -y default-jre
   cp "${JAVA_HOME}"/jre/lib/security/policy/unlimited/*.jar "${JAVA_HOME}"/jre/lib/security
 }
 
 function create_service_principals() {
-  if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
-    local server_started=0
-    for (( i=0; i < 5*60; i++ )); do
-      echo "Waiting for KDC and root principal."
-      if gsutil -q stat "gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"; then
-        server_started=1
-        break
-      fi
-      sleep 1
-    done
+  # if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
+  #   local server_started=0
+  #   for (( i=0; i < 5*60; i++ )); do
+  #     echo "Waiting for KDC and root principal."
+  #     if gsutil -q stat "gs://${staging_meta_info_gcs_prefix}/${krb5_server_mark_file}"; then
+  #       server_started=1
+  #       break
+  #     fi
+  #     sleep 1
+  #   done
 
-    if [[ "${server_started}" == 0 ]]; then
-      echo 'Kerberos server has not started even after 5 minutes, likely failed.'
-      exit 1
-    fi
-  fi
+  #   if [[ "${server_started}" == 0 ]]; then
+  #     echo 'Kerberos server has not started even after 5 minutes, likely failed.'
+  #     exit 1
+  #   fi
+  # fi
 
-  if [[ "${HA_MODE}" == 1 && "${ROLE}" == 'Master' ]]; then
-    echo "Creating host principal on ${FQDN}"
-    kadmin -p root -w "${root_principal_password}" -q "addprinc -randkey host/${FQDN}"
-    kadmin -p root -w "${root_principal_password}" -q "ktadd host/${FQDN}"
-    if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
-      gsutil cp "gs://${staging_meta_info_gcs_prefix}/stash" /etc/krb5kdc/stash
-    fi
-  fi
+  # if [[ "${HA_MODE}" == 1 && "${ROLE}" == 'Master' ]]; then
+  #   echo "Creating host principal on ${FQDN}"
+  #   kadmin -p root -w "${root_principal_password}" -q "addprinc -randkey host/${FQDN}"
+  #   kadmin -p root -w "${root_principal_password}" -q "ktadd host/${FQDN}"
+  #   if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
+  #     gsutil cp "gs://${staging_meta_info_gcs_prefix}/stash" /etc/krb5kdc/stash
+  #   fi
+  # fi
 
   echo "Creating service principals on ${FQDN}"
   # principals: hdfs/<FQDN>, yarn/<FQDN>, mapred/<FQDN> and HTTP/<FQDN>
@@ -257,100 +261,100 @@ function create_service_principals() {
   chmod 440 "${HADOOP_CONF_DIR}"/http.keytab
 }
 
-function config_krb5_propagate_if_necessary() {
-  if [[ "${HA_MODE}" == 1 && "${ROLE}" == 'Master' ]]; then
-    cat << EOF >> /etc/services
-krb5_prop 754/tcp
-EOF
-    echo "Installing xinetd"
-    apt-get install -y xinetd
-    cat << EOF > /etc/xinetd.d/krb5_prop
-service krb5_prop
-{
-        disable         = no
-        socket_type     = stream
-        protocol        = tcp
-        user            = root
-        wait            = no
-        server          = /usr/sbin/kpropd
-}
-EOF
-    systemctl restart xinetd
+# function config_krb5_propagate_if_necessary() {
+#   if [[ "${HA_MODE}" == 1 && "${ROLE}" == 'Master' ]]; then
+#     cat << EOF >> /etc/services
+# krb5_prop 754/tcp
+# EOF
+#     echo "Installing xinetd"
+#     apt-get install -y xinetd
+#     cat << EOF > /etc/xinetd.d/krb5_prop
+# service krb5_prop
+# {
+#         disable         = no
+#         socket_type     = stream
+#         protocol        = tcp
+#         user            = root
+#         wait            = no
+#         server          = /usr/sbin/kpropd
+# }
+# EOF
+#     systemctl restart xinetd
 
-    # Assuming there will be 3 masters which are $CLUSTER_NAME-m-0,
-    # $CLUSTER_NAME-m-1 and $CLUSTER_NAME-m-2
-    # To include all 3 masters in the ACL files on all 3 masters makes
-    # failover easier if it is needed.
-    cat << EOF >> /etc/krb5kdc/kpropd.acl
-host/$CLUSTER_NAME-m-0.$DOMAIN@$REALM
-host/$CLUSTER_NAME-m-1.$DOMAIN@$REALM
-host/$CLUSTER_NAME-m-2.$DOMAIN@$REALM
-EOF
+#     # Assuming there will be 3 masters which are $CLUSTER_NAME-m-0,
+#     # $CLUSTER_NAME-m-1 and $CLUSTER_NAME-m-2
+#     # To include all 3 masters in the ACL files on all 3 masters makes
+#     # failover easier if it is needed.
+#     cat << EOF >> /etc/krb5kdc/kpropd.acl
+# host/$CLUSTER_NAME-m-0.$DOMAIN@$REALM
+# host/$CLUSTER_NAME-m-1.$DOMAIN@$REALM
+# host/$CLUSTER_NAME-m-2.$DOMAIN@$REALM
+# EOF
 
-    if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
-      touch "krb5_prop_acl_mark_$FQDN"
-      gsutil cp "./krb5_prop_acl_mark_$FQDN" "gs://${staging_meta_info_gcs_prefix}/krb5_prop_acl/krb5_prop_acl_mark_$FQDN"
-      rm "krb5_prop_acl_mark_$FQDN"
-      local krb5_prop_finish=0
-      for (( i=0; i < 5*60; i++)); do
-        echo "Waiting for initial KDC database propagation to finish..."
-        if gsutil -q stat "gs://${staging_meta_info_gcs_prefix}/${FQDN}-propagated"; then
-          krb5_prop_finish=1
-          break
-        fi
-        sleep 1
-      done
+#     if [[ "${FQDN}" != "${MASTER_FQDN}" ]]; then
+#       touch "krb5_prop_acl_mark_$FQDN"
+#       gsutil cp "./krb5_prop_acl_mark_$FQDN" "gs://${staging_meta_info_gcs_prefix}/krb5_prop_acl/krb5_prop_acl_mark_$FQDN"
+#       rm "krb5_prop_acl_mark_$FQDN"
+#       local krb5_prop_finish=0
+#       for (( i=0; i < 5*60; i++)); do
+#         echo "Waiting for initial KDC database propagation to finish..."
+#         if gsutil -q stat "gs://${staging_meta_info_gcs_prefix}/${FQDN}-propagated"; then
+#           krb5_prop_finish=1
+#           break
+#         fi
+#         sleep 1
+#       done
 
-      if [[ "${krb5_prop_finish}" == 0 ]]; then
-        echo 'Initial KDC database propagation did not finish after 5 minutes, likely failed.'
-        exit 1
-      fi
+#       if [[ "${krb5_prop_finish}" == 0 ]]; then
+#         echo 'Initial KDC database propagation did not finish after 5 minutes, likely failed.'
+#         exit 1
+#       fi
 
-      echo "Restarting krb5-kdc on ${FQDN}."
-      systemctl restart krb5-kdc || err 'Cannot restart KDC'
-      echo "Restarting krb5-admin-server on ${FQDN}."
-      systemctl restart krb5-admin-server || err 'Cannot restart Kerberos admin server'
-    else
-      # On Master-KDC
-      /usr/sbin/kdb5_util dump /etc/krb5kdc/slave_datatrans
-      local krb5_prop_acl_configured=0
-      for (( i=0; i < 5*60; i++ )); do
-        echo "Waiting for all slave KDCs to finish krb_prop_acl configuration."
-        finished_count="$((gsutil ls gs://${staging_meta_info_gcs_prefix}/krb5_prop_acl/* 2>/dev/null || true) | wc -l)"
-        if [[ "${finished_count}" == "${#ADDITIONAL_MASTERS[@]}" ]]; then
-          krb5_prop_acl_configured=1
-          break
-        fi
-        sleep 1
-      done
+#       echo "Restarting krb5-kdc on ${FQDN}."
+#       systemctl restart krb5-kdc || err 'Cannot restart KDC'
+#       echo "Restarting krb5-admin-server on ${FQDN}."
+#       systemctl restart krb5-admin-server || err 'Cannot restart Kerberos admin server'
+#     else
+#       # On Master-KDC
+#       /usr/sbin/kdb5_util dump /etc/krb5kdc/slave_datatrans
+#       local krb5_prop_acl_configured=0
+#       for (( i=0; i < 5*60; i++ )); do
+#         echo "Waiting for all slave KDCs to finish krb_prop_acl configuration."
+#         finished_count="$((gsutil ls gs://${staging_meta_info_gcs_prefix}/krb5_prop_acl/* 2>/dev/null || true) | wc -l)"
+#         if [[ "${finished_count}" == "${#ADDITIONAL_MASTERS[@]}" ]]; then
+#           krb5_prop_acl_configured=1
+#           break
+#         fi
+#         sleep 1
+#       done
 
-      if [[ "${krb5_prop_acl_configured}" == 0 ]]; then
-        echo 'Slave KDCs have not finished ACL configuration even after 5 minutes, something went wrong.'
-        exit 1
-      fi
+#       if [[ "${krb5_prop_acl_configured}" == 0 ]]; then
+#         echo 'Slave KDCs have not finished ACL configuration even after 5 minutes, something went wrong.'
+#         exit 1
+#       fi
 
-      for additional_master in "${ADDITIONAL_MASTERS[@]}"; do
-        kprop -f /etc/krb5kdc/slave_datatrans "${additional_master}"
-        touch "${additional_master}.${DOMAIN}-propagated"
-        gsutil cp "${additional_master}.${DOMAIN}-propagated" "gs://${staging_meta_info_gcs_prefix}/${additional_master}.${DOMAIN}-propagated"
-        rm "${additional_master}.${DOMAIN}-propagated"
-      done
+#       for additional_master in "${ADDITIONAL_MASTERS[@]}"; do
+#         kprop -f /etc/krb5kdc/slave_datatrans "${additional_master}"
+#         touch "${additional_master}.${DOMAIN}-propagated"
+#         gsutil cp "${additional_master}.${DOMAIN}-propagated" "gs://${staging_meta_info_gcs_prefix}/${additional_master}.${DOMAIN}-propagated"
+#         rm "${additional_master}.${DOMAIN}-propagated"
+#       done
 
-      echo 'Preparing krb5_prop script'
-      cat << 'EOF' > "${KRB5_PROP_SCRIPT}"
-#!/bin/bash
-SLAVES=($(/usr/share/google/get_metadata_value attributes/dataproc-master-additional | sed 's/,/\n/g'))
-/usr/sbin/kdb5_util dump /etc/krb5kdc/slave_datatrans
-for slave in "${SLAVES[@]}"; do
-  /usr/sbin/kprop -f /etc/krb5kdc/slave_datatrans "${slave}"
-done
-EOF
-      chmod +x "${KRB5_PROP_SCRIPT}"
+#       echo 'Preparing krb5_prop script'
+#       cat << 'EOF' > "${KRB5_PROP_SCRIPT}"
+# #!/bin/bash
+# SLAVES=($(/usr/share/google/get_metadata_value attributes/dataproc-master-additional | sed 's/,/\n/g'))
+# /usr/sbin/kdb5_util dump /etc/krb5kdc/slave_datatrans
+# for slave in "${SLAVES[@]}"; do
+#   /usr/sbin/kprop -f /etc/krb5kdc/slave_datatrans "${slave}"
+# done
+# EOF
+#       chmod +x "${KRB5_PROP_SCRIPT}"
 
-      (crontab -l 2>/dev/null || true; echo "*/5 * * * * ${KRB5_PROP_SCRIPT} >/dev/null 2>&1") | crontab -
-    fi
-  fi
-}
+#       (crontab -l 2>/dev/null || true; echo "*/5 * * * * ${KRB5_PROP_SCRIPT} >/dev/null 2>&1") | crontab -
+#     fi
+#   fi
+# }
 
 function set_property_in_xml() {
   bdconfig set_property \
@@ -653,20 +657,20 @@ function create_dataproc_principal() {
   chmod 400 /etc/dataproc.keytab
 }
 
-function krb5_propagate() {
-  if [[ "${FQDN}" == "${MASTER_FQDN}" && "${HA_MODE}" == 1 ]]; then
-    "${KRB5_PROP_SCRIPT}"
-  fi
-}
+# function krb5_propagate() {
+#   if [[ "${FQDN}" == "${MASTER_FQDN}" && "${HA_MODE}" == 1 ]]; then
+#     "${KRB5_PROP_SCRIPT}"
+#   fi
+# }
 
 function main() {
   update_apt_get
   install_kerberos
   install_jce
-  create_cross_realm_trust_principal_if_necessary
-  create_root_user_principal_and_ready_stash
+#  create_cross_realm_trust_principal_if_necessary
+#  create_root_user_principal_and_ready_stash
   create_service_principals
-  config_krb5_propagate_if_necessary
+#  config_krb5_propagate_if_necessary
   config_core_site
   config_hdfs_site
   config_yarn_site_and_permission
@@ -678,7 +682,7 @@ function main() {
   secure_spark
   restart_services
   create_dataproc_principal
-  krb5_propagate
+#  krb5_propagate
 }
 
 main
